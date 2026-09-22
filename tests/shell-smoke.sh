@@ -313,6 +313,32 @@ tethys_cfg_load "$_work/badval.env" >/dev/null 2>&1
 check "an out-of-enum value is refused; the default stands" "balanced"      "$TS_POWER_MODE"
 check "a valid line in the same file is still applied"      "netstack-only" "$TS_TUN_MODE"
 
+# ================== M2 · the packer's own repository root is declared =========
+# pack-module.sh refuses a tree carrying a top-level entry it has no opinion
+# about, by design. It was proven on a FIXTURE tree, so it first met its own
+# repository root in CI - which carries .github/ and, there, the workflow's
+# payload/ staging directory - and it refused, so no release zip was ever built.
+# This case asks the real root every run, so the answer cannot drift in private
+# again. --audit-tree is the packer's tree-only mode: no daemon, no archive, and
+# no suite (the suite is asking this question, and a gate that runs its own
+# caller is a recursion rather than a check).
+_pack_out=$( cd "$_here/.." && sh tools/pack-module.sh --audit-tree 2>&1 ); _pack_rc=$?
+check "the real repository root is fully declared to the packer" "0" "$_pack_rc"
+[ "$_pack_rc" -eq 0 ] || printf '%s\n' "$_pack_out" | sed 's/^/        /'
+
+# ...and that check would pass on a packer that had simply stopped looking, so a
+# tree carrying a stray top-level entry must still refuse - and name the entry.
+_stray="$_work/stray-tree"
+mkdir -p "$_stray/scripts" "$_stray/mystery"
+for _f in module.prop customize.sh service.sh uninstall.sh config.env; do
+  cp "$_here/../$_f" "$_stray/$_f"
+done
+cp "$_here/../scripts/tethys.lib.sh" "$_stray/scripts/"
+_stray_out=$( cd "$_here/.." && sh tools/pack-module.sh --audit-tree "$_stray" 2>&1 ); _stray_rc=$?
+check "an undeclared top-level entry still refuses the pack" "1" "$_stray_rc"
+check "and the refusal names the entry it has no opinion about" "yes" \
+  "$(case "$_stray_out" in *mystery*) echo yes ;; *) echo no ;; esac)"
+
 echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

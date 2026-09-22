@@ -35,7 +35,16 @@
 # ships a wrapper directory one day and finds out on someone else's phone.
 #
 # Usage:  sh tools/pack-module.sh <path-to-tailscaled> [repo-root]
+#         sh tools/pack-module.sh --audit-tree [repo-root]
 # Exit:   0 = zip built and its structure proven, 1 = refused
+#
+# --audit-tree answers ONE question - is this tree fully declared? - and stops
+# before the daemon, the suite and the archive. It exists because the packer was
+# proven on a fixture tree and first met its OWN repository root in CI, where
+# .github/ and the workflow's payload/ staging directory made it refuse and no
+# zip was ever built. tests/shell-smoke.sh now asks the real root on every run.
+# The suite is deliberately NOT run in this mode: the suite asks the packer back,
+# and a gate that runs its own caller is a recursion, not a check.
 #
 # The daemon is built by the fork's CI (milestone M2), never here:
 #   tethys-tailscale-android/.github/workflows/build-android.yml
@@ -43,6 +52,16 @@
 set -u
 
 _here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# --audit-tree (see the header) reshapes the two positionals, so every line below
+# still reads a daemon from $1 and a repository root from $2.
+_audit=0
+if [ "${1:-}" = "--audit-tree" ]; then
+  _audit=1
+  shift
+  set -- "" "${1:-}"
+fi
+
 _root=${2:-$(CDPATH= cd -- "$_here/.." && pwd)}
 _daemon=${1:-}
 
@@ -51,8 +70,13 @@ _daemon=${1:-}
 # about what ships and not two that can drift apart.
 _required='module.prop customize.sh service.sh uninstall.sh config.env scripts/tethys.lib.sh'
 
-# ACKNOWLEDGED - may exist in the tree, never enters the zip.
-_ack='.git .gitignore README.md tests tools dist system'
+# ACKNOWLEDGED - may exist in the tree, never enters the zip. .github/ is the
+# repository's own workflows; payload/ is where the workflow stages the daemon it
+# downloads. The daemon reaches the archive through system/, constructed from the
+# argument - so neither of them belongs in it. Both were learned the hard way:
+# this packer first met its own repository root in CI, refused it, and the zip
+# was never built.
+_ack='.git .gitignore README.md tests tools dist system .github payload'
 
 pass=0
 fail=0
@@ -71,6 +95,87 @@ in_list() {  # $1 = needle, $2 = space-separated list
 printf 'Tethys module packer\n'
 printf '  repo  : %s\n' "$_root"
 printf '  daemon: %s\n\n' "${_daemon:-<none given>}"
+
+# ------------------------------------------------------------- module identity
+# The zip's name is derived from module.prop, so a missing or unusable id/version
+# is not a naming nicety: it is the artifact's identity, and its filename.
+_prop="$_root/module.prop"
+[ -f "$_prop" ] || refuse "module.prop is missing from $_root - a Magisk/KernelSU module without it is not a module."
+_id=$(sed -n 's/^id=//p' "$_prop" | head -n 1 | tr -d '\r')
+_ver=$(sed -n 's/^version=//p' "$_prop" | head -n 1 | tr -d '\r')
+[ -n "$_id" ]  || refuse "module.prop declares no id=, and the zip name is built from it."
+[ -n "$_ver" ] || refuse "module.prop declares no version=, and the zip name is built from it."
+# Both land in a filename, so neither may carry anything that is not safe there.
+case "$_id"  in *[!A-Za-z0-9._-]*) refuse "module.prop id= is not filename-safe: $_id" ;; esac
+case "$_ver" in *[!A-Za-z0-9._-]*) refuse "module.prop version= is not filename-safe: $_ver" ;; esac
+ok "identity: $_id $_ver"
+
+# --------------------------------------------------------------- the manifest
+for _f in $_required; do
+  [ -f "$_root/$_f" ] || refuse "required file missing from the tree: $_f"
+done
+ok "all 6 required files are present"
+
+_ship=''
+for _f in $_required; do
+  _t=${_f%%/*}
+  in_list "$_t" "$_ship" || _ship="$_ship $_t"
+done
+_ship=${_ship# }
+
+_unknown=''
+_ack_n=0
+for _e in "$_root"/* "$_root"/.[!.]*; do
+  [ -e "$_e" ] || continue
+  _n=$(basename -- "$_e")
+  if in_list "$_n" "$_ship"; then :
+  elif in_list "$_n" "$_ack"; then
+    _ack_n=$((_ack_n + 1)); info "acknowledged, not shipped: $_n"
+  else _unknown="$_unknown $_n"
+  fi
+done
+[ -z "$_unknown" ] || refuse "the tree carries entries this packer has no opinion about:$_unknown
+       Every top-level entry must be either shipped or acknowledged, or the
+       archive is assembled by guesswork - and guesswork is how a file ends up
+       silently missing from a zip that then fails on someone's device."
+ok "every top-level entry is declared"
+
+# system/ is CONSTRUCTED, never copied. This scan catches a tree-side file that
+# would be silently dropped rather than shipped.
+if [ -e "$_root/system" ]; then
+  for _e in "$_root"/system/* "$_root"/system/.[!.]*; do
+    [ -e "$_e" ] || continue
+    _n=$(basename -- "$_e")
+    [ "$_n" = "bin" ] || refuse "unexpected entry in system/: $_n
+       system/ is built from the daemon argument, so a tree-side file here would
+       be silently dropped from the zip. Move it, or teach this packer about it."
+    for _b in "$_e"/* "$_e"/.[!.]*; do
+      [ -e "$_b" ] || continue
+      _bn=$(basename -- "$_b")
+      case "$_bn" in
+        tailscaled|tailscale) : ;;
+        *) refuse "unexpected entry in system/bin/: $_bn (only the two gitignored payload paths belong there)" ;;
+      esac
+    done
+  done
+  ok "tree-side system/ holds only the payload paths - acknowledged, never copied"
+fi
+
+# ------------------------------------------------------------------ the audit
+# --audit-tree stops HERE, and stops deliberately: the daemon, the suite and the
+# archive all come after, and the question this mode answers - is this tree fully
+# declared? - has just been answered. The suite is not run here either, because
+# its own case asks THIS mode back: a gate that runs its own caller is a
+# recursion, not a check.
+if [ "$_audit" -eq 1 ]; then
+  printf '\n  %d passed, %d failed\n' "$pass" "$fail"
+  if [ "$fail" -eq 0 ]; then
+    printf '  this tree would pack: %s shipped, %s acknowledged, 0 unknown\n\n' \
+      "$(printf '%s' "$_ship" | wc -w | tr -d ' ')" "$_ack_n"
+    exit 0
+  fi
+  exit 1
+fi
 
 # ------------------------------------------------------------------- the tools
 # The archive is built, listed, measured and hashed by ONE implementation:
@@ -136,69 +241,6 @@ else
   info "no $_daemon.sha256 beside the daemon - its provenance is unverified on this host"
 fi
 
-# ------------------------------------------------------------- module identity
-# The zip's name is derived from module.prop, so a missing or unusable id/version
-# is not a naming nicety: it is the artifact's identity, and its filename.
-_prop="$_root/module.prop"
-[ -f "$_prop" ] || refuse "module.prop is missing from $_root - a Magisk/KernelSU module without it is not a module."
-_id=$(sed -n 's/^id=//p' "$_prop" | head -n 1 | tr -d '\r')
-_ver=$(sed -n 's/^version=//p' "$_prop" | head -n 1 | tr -d '\r')
-[ -n "$_id" ]  || refuse "module.prop declares no id=, and the zip name is built from it."
-[ -n "$_ver" ] || refuse "module.prop declares no version=, and the zip name is built from it."
-# Both land in a filename, so neither may carry anything that is not safe there.
-case "$_id"  in *[!A-Za-z0-9._-]*) refuse "module.prop id= is not filename-safe: $_id" ;; esac
-case "$_ver" in *[!A-Za-z0-9._-]*) refuse "module.prop version= is not filename-safe: $_ver" ;; esac
-ok "identity: $_id $_ver"
-
-# --------------------------------------------------------------- the manifest
-for _f in $_required; do
-  [ -f "$_root/$_f" ] || refuse "required file missing from the tree: $_f"
-done
-ok "all 6 required files are present"
-
-_ship=''
-for _f in $_required; do
-  _t=${_f%%/*}
-  in_list "$_t" "$_ship" || _ship="$_ship $_t"
-done
-_ship=${_ship# }
-
-_unknown=''
-for _e in "$_root"/* "$_root"/.[!.]*; do
-  [ -e "$_e" ] || continue
-  _n=$(basename -- "$_e")
-  if in_list "$_n" "$_ship"; then :
-  elif in_list "$_n" "$_ack"; then info "acknowledged, not shipped: $_n"
-  else _unknown="$_unknown $_n"
-  fi
-done
-[ -z "$_unknown" ] || refuse "the tree carries entries this packer has no opinion about:$_unknown
-       Every top-level entry must be either shipped or acknowledged, or the
-       archive is assembled by guesswork - and guesswork is how a file ends up
-       silently missing from a zip that then fails on someone's device."
-ok "every top-level entry is declared"
-
-# system/ is CONSTRUCTED, never copied. This scan catches a tree-side file that
-# would be silently dropped rather than shipped.
-if [ -e "$_root/system" ]; then
-  for _e in "$_root"/system/* "$_root"/system/.[!.]*; do
-    [ -e "$_e" ] || continue
-    _n=$(basename -- "$_e")
-    [ "$_n" = "bin" ] || refuse "unexpected entry in system/: $_n
-       system/ is built from the daemon argument, so a tree-side file here would
-       be silently dropped from the zip. Move it, or teach this packer about it."
-    for _b in "$_e"/* "$_e"/.[!.]*; do
-      [ -e "$_b" ] || continue
-      _bn=$(basename -- "$_b")
-      case "$_bn" in
-        tailscaled|tailscale) : ;;
-        *) refuse "unexpected entry in system/bin/: $_bn (only the two gitignored payload paths belong there)" ;;
-      esac
-    done
-  done
-  ok "tree-side system/ holds only the payload paths - acknowledged, never copied"
-fi
-
 # ------------------------------------------------------------------- the suite
 # The module's own suite gates the pack. Packing a tree whose runtime is broken
 # moves that failure onto the device, at boot, where it is worst.
@@ -261,7 +303,7 @@ check "the daemon travels inside it"  "yes" "$(present system/bin/tailscaled)"
 for _f in customize.sh service.sh uninstall.sh config.env scripts/tethys.lib.sh; do
   check "packed: $_f" "yes" "$(present "$_f")"
 done
-for _x in README.md .gitignore tools tests dist; do
+for _x in README.md .gitignore tools tests dist .github payload; do
   check "not packed: $_x" "no" "$(carried "$_x")"
 done
 

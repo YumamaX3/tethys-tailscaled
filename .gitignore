@@ -9,6 +9,11 @@ system/bin/tailscale
 # meaningful for the exact bytes it was built from.
 /dist/
 
+# Where the workflow stages the daemon it downloads from the fork's release, and
+# where a local run of the same steps would put it. Acknowledged by the packer,
+# never part of the module, never committed.
+/payload/
+
 # Local install/test scratch
 *.tmp
 err.tmp

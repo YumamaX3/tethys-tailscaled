@@ -223,6 +223,21 @@ Nothing assembles the zip by hand:
 sh tools/pack-module.sh /path/to/tailscaled.arm64 .
 ```
 
+Asked *before* a payload exists — a daemon takes CI and a NDK to build, and the
+question "would this tree pack?" should not have to wait for one — the same tool
+answers it alone, without the archive and without the suite:
+
+```sh
+sh tools/pack-module.sh --audit-tree .
+```
+
+That mode is not a convenience. The packer was proven on a fixture tree and first
+met its **own** repository root in CI, which carries `.github/` and, during a
+build, the workflow's `payload/` staging directory — so it refused, and the
+release zip was never assembled. `tests/shell-smoke.sh` now asks the real root on
+every run, and both of those entries are declared to the packer as
+acknowledged-not-shipped.
+
 The packer refuses, loudly, rather than shipping something broken:
 
 - a payload that is not an ELF object, or is not `arm64`;
