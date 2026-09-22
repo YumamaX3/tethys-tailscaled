@@ -219,9 +219,22 @@ device will settle it.
    `arm64` target, then injected here by CI (milestone M2). Until that build
    current exists, this zip is **not installable** — `customize.sh` refuses it,
    by design, because a module whose daemon is absent cannot work.
-2. **Runtime tuning is reconciled by hand.** The fork's `devices/pixel6pro.env`
-   and this module's `config.env` both carry runtime keys; a CI step that emits
-   one from the other — or proves they agree — is owed with M2.
+2. **Identity keys are still reconciled by hand.** The fork's
+   `devices/pixel6pro.env` and this module's `config.env` both name device
+   identity (`TETHYS_MATCH_*`), and the two are compared by eye today. Proving
+   they agree spans two repositories, so the check needs both trees present —
+   owed, and narrowed to exactly this.
+
+   The **build** half is no longer a debt. The fork's workflow sources each device
+   profile for the leg it describes and runs `tools/check-device-profile.sh`
+   first, which re-derives the NDK version from patch 0001, the CGO decision and
+   the arch matrix from the workflow, and the ABI from the profile's own
+   `GOARCH` — so drift fails the run instead of shipping a wrong binary.
+
+   The **runtime** half is deliberately *not* wired. Those keys are the daemon's
+   specification (plan M9 power governor, M10 MTU-derived MSS), and this module
+   tunes no Go runtime from the shell: a knob the daemon owns cannot be measured
+   from outside it, so setting it here would be a guess wearing a setting's name.
 3. **The panel, the six feature bundles, and the ritual journal do not exist
    yet.** They are M12–M19 of the sealed plan; this module is its M3 skeleton.
 
