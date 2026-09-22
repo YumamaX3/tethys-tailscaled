@@ -110,8 +110,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # The Description Decree: a release carries the story, not a bare
+          # "Release vX" and not a generated changelog. The annotated tag is
+          # where this project writes that story, so the body is taken from the
+          # tag itself rather than from a note generator.
           gh release create "${GITHUB_REF_NAME}" \
             --title "Tethys tailscaled ${GITHUB_REF_NAME}" \
-            --generate-notes \
+            --notes-from-tag \
             dist/*.zip dist/*.sha256 || \
           gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/*.sha256 --clobber
