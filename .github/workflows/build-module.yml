@@ -42,6 +42,38 @@ jobs:
       - name: Checkout this module
         uses: actions/checkout@v4
 
+      - name: The tag must carry its story (tag runs only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          # A release body is the STORY of the artifact, and this project keeps
+          # that story in the annotated tag. It is read through the API and its
+          # TYPE is checked rather than assumed, because gh's --notes-from-tag
+          # resolves to the commit message whenever it cannot see an annotated
+          # tag - which is exactly what v1.98.8-tethys.0 published: a release
+          # about a module, whose body told the tale of a shell bug (measured
+          # 2026-09-23; the note step is mended in the same change).
+          #
+          # Failing here costs five seconds. Failing after the pack costs a
+          # daemon download and a minute of compression, for a release nobody
+          # could read.
+          ref_json="$(gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag")"
+          obj_type="$(printf '%s' "$ref_json" | jq -r .object.type)"
+          obj_sha="$(printf '%s' "$ref_json" | jq -r .object.sha)"
+          test "$obj_type" = "tag" || {
+            echo "FAIL: $tag is not an annotated tag - there is no story to publish" >&2
+            exit 1
+          }
+          story_bytes="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$obj_sha" --jq '.message | length')"
+          test "$story_bytes" -gt 0 || {
+            echo "FAIL: the annotated tag $tag carries no message" >&2
+            exit 1
+          }
+          echo "the tag carries $story_bytes bytes of story"
+
       - name: Resolve the daemon's release tag
         id: daemon
         env:
@@ -110,12 +142,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          tag="$GITHUB_REF_NAME"
           # The Description Decree: a release carries the story, not a bare
           # "Release vX" and not a generated changelog. The annotated tag is
-          # where this project writes that story, so the body is taken from the
-          # tag itself rather than from a note generator.
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "Tethys tailscaled ${GITHUB_REF_NAME}" \
-            --notes-from-tag \
-            dist/*.zip dist/*.sha256 || \
-          gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/*.sha256 --clobber
+          # where this project writes that story - read here through the API,
+          # with the tag's type checked, because --notes-from-tag quietly fell
+          # back to the commit message on this repository's first successful tag
+          # run (v1.98.8-tethys.0, measured 2026-09-23).
+          obj_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" --jq '.object.sha')"
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$obj_sha" --jq '.message' > RELEASE-NOTES.md
+          test -s RELEASE-NOTES.md || { echo "FAIL: no story on $tag" >&2; exit 1; }
+
+          # Idempotent on purpose: a re-cast tag must be able to REPAIR its
+          # release, not collide with it. Create when absent; otherwise replace
+          # the notes and the assets in place.
+          gh release create "$tag" \
+            --title "Tethys tailscaled $tag" \
+            --notes-file RELEASE-NOTES.md \
+            dist/*.zip dist/*.sha256 || {
+            gh release edit "$tag" --notes-file RELEASE-NOTES.md
+            gh release upload "$tag" dist/*.zip dist/*.sha256 --clobber
+          }
