@@ -269,10 +269,12 @@ only means anything for the exact bytes it was built from.
    Until that tag exists this zip is still not installable — `customize.sh`
    refuses it, by design, because a module whose daemon is absent cannot work.
 
-   One thing will bite while the fork is private: this repository's built-in
-   token cannot read another private repository, so a classic PAT with `repo`
-   read must be stored as the `FORK_TOKEN` secret. A public fork needs nothing —
-   the workflow falls back to the built-in token.
+   The fork is **public**, so this repository's built-in token reads its release
+   assets and no secret is required. If it is ever made private that stops being
+   true — another private repository cannot be read by this one's token — and a
+   classic PAT with `repo` read must then be stored as the `FORK_TOKEN` secret.
+   The workflow already prefers that secret when it exists, so the only thing
+   that would change is the secret's presence.
 2. **Identity keys are still reconciled by hand.** The fork's
    `devices/pixel6pro.env` and this module's `config.env` both name device
    identity (`TETHYS_MATCH_*`), and the two are compared by eye today. Proving
