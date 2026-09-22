@@ -151,6 +151,168 @@ check "trim_log leaves a log under the ceiling alone" "5" \
 check "codename falls back to a named default without getprop" "unknown" "$(tethys_device_codename)"
 check "abi falls back to empty without getprop" "" "$(tethys_abi)"
 
+# ===================== M4 · schema, validator, and one-time migration ========
+# The plan's §8.3 deliverable, proven in both halves: values refused by TYPE,
+# and a legacy config completed ONCE with every existing value preserved.
+#
+# The fixtures are the real artifacts - tests/fixtures/config-v2.3.1.env is the
+# canonical legacy file as upstream v2.3.1 shipped it, not a shape we invented.
+
+vok() { if tethys_cfg_value_ok "$1" "$2"; then echo ok; else echo refused; fi; }
+
+# sed-based reader: the value of $2 in file $1, with one layer of quotes removed.
+cfgval() { sed -n "s/^$2='\(.*\)'\$/\1/p" "$1" | head -n1; }
+
+# --- the schema is ONE truth; the documented template must not drift from it --
+_defaults="$_work/schema-defaults.env"
+tethys_cfg_default_lines > "$_defaults"
+
+_missing=""
+while IFS= read -r _want; do
+  _k=${_want%%=*}
+  grep -q "^${_k}=" "$_here/../config.env" || _missing="$_missing $_k"
+done < "$_defaults"
+check "every schema key appears in config.env (one truth, not two)" "" "$_missing"
+
+# Read the template the way a human writes it and the loader reads it: trim
+# blanks, cut a trailing note, trim again, then strip one layer of quotes. The
+# template spells its values with DOUBLE quotes and trails some with "# notes",
+# so a reader that knew only one quote style - or that cut a note without
+# trimming what the cut left behind - would report every default as drifted, a
+# false alarm that teaches the next reader to distrust the check, not the file.
+# tethys_trim_blanks comes from the library under test, so the two cannot drift.
+tplval() {
+  _tv=$(sed -n "s/^$1=//p" "$_here/../config.env" | head -n1)
+  _tv=$(printf '%s' "$_tv" | tr -d '\r')
+  _tv=$(tethys_trim_blanks "$_tv")
+  case "$_tv" in
+    '"'*'"'|"'"*"'") : ;;
+    *)
+      case "$_tv" in *' #'*) _tv=${_tv%%' #'*} ;; esac
+      _tv=$(tethys_trim_blanks "$_tv")
+      ;;
+  esac
+  case "$_tv" in
+    '"'*'"') _tv=${_tv#\"}; _tv=${_tv%\"} ;;
+    "'"*"'") _tv=${_tv#\'}; _tv=${_tv%\'} ;;
+  esac
+  printf '%s' "$_tv"
+}
+
+_drift=""
+while IFS= read -r _want; do
+  _k=${_want%%=*}; _dv=${_want#*=}
+  # tethys_cfg_default_lines emits canonical NAME='VALUE' lines, so the schema's
+  # default arrives quoted while the template's arrives bare. Strip the schema
+  # side's quotes, or every single row reads as a mismatch.
+  case "$_dv" in "'"*"'") _dv=${_dv#\'}; _dv=${_dv%\'} ;; esac
+  _tv=$(tplval "$_k")
+  [ "$_dv" = "$_tv" ] || _drift="$_drift $_k(schema=[$_dv] template=[$_tv])"
+done < "$_defaults"
+check "the template's stated defaults equal the schema's" "" "$_drift"
+
+# --- a value is judged by ITS key's type, and a refusal is not a coercion ----
+check "bool accepts 1"                      "ok"      "$(vok TS_START_ON_BOOT 1)"
+check "bool refuses 2"                      "refused" "$(vok TS_START_ON_BOOT 2)"
+check "enum accepts a listed value"         "ok"      "$(vok TS_TUN_MODE netstack-only)"
+check "enum refuses an unlisted value"      "refused" "$(vok TS_TUN_MODE banana)"
+check "int accepts an in-range value"       "ok"      "$(vok TS_LOG_MAX_KB 512)"
+check "int refuses a non-number"            "refused" "$(vok TS_LOG_MAX_KB abc)"
+check "metacharacters are refused"          "refused" "$(vok TS_EXTRA_UP_ARGS '--x; rm -rf /')"
+check "a glob is refused"                   "refused" "$(vok TS_EXTRA_UP_ARGS '*')"
+check "an embedded tab is refused"          "refused" "$(vok TS_EXTRA_UP_ARGS "$(printf 'a\tb')")"
+check "an empty value is legal where stated" "ok"     "$(vok TS_EXTRA_UP_ARGS '')"
+check "a bare-word url is refused"          "refused" "$(vok TS_LOGIN_SERVER headscale.example.com)"
+check "an https url is accepted"            "ok"      "$(vok TS_LOGIN_SERVER https://hs.example.com)"
+check "a hostname with a space is refused"  "refused" "$(vok TS_HOSTNAME 'bad host')"
+check "a plain hostname is accepted"        "ok"      "$(vok TS_HOSTNAME phone)"
+check "a uids range list is accepted"       "ok"      "$(vok TS_SPLIT_TUNNEL_UIDS '1000,10123-10130')"
+check "a uids word is refused"              "refused" "$(vok TS_SPLIT_TUNNEL_UIDS abc)"
+check "a key outside the schema is refused" "refused" "$(vok TS_NOT_A_KEY 1)"
+
+# --- the FILE validator reports reasons, and the reasons leak no values ------
+tethys_cfg_validate "$_here/../config.env" >/dev/null 2>&1
+check "the packaged template validates" "0" "$?"
+
+cat > "$_work/dup.env" <<'EOF'
+TS_HOSTNAME='phone'
+TS_HOSTNAME='other'
+EOF
+_out=$(tethys_cfg_validate "$_work/dup.env" 2>&1); _rc=$?
+check "a duplicate key is refused" "1" "$_rc"
+check "the duplicate reason names the offending line" "yes" \
+  "$(case "$_out" in *"line 2: duplicate key TS_HOSTNAME"*) echo yes ;; *) echo no ;; esac)"
+
+cat > "$_work/unknown.env" <<'EOF'
+TS_UNSUPPORTED_SECRET_NAME='do-not-echo-me'
+EOF
+_out=$(tethys_cfg_validate "$_work/unknown.env" 2>&1); _rc=$?
+check "an unsupported key is refused" "1" "$_rc"
+check "the refused key's NAME is not echoed back" "no" \
+  "$(case "$_out" in *TS_UNSUPPORTED_SECRET_NAME*|*do-not-echo-me*) echo yes ;; *) echo no ;; esac)"
+
+# --- migration: complete a legacy config ONCE, preserving every value -------
+_leg="$_work/legacy.env"
+cp "$_here/fixtures/config-v2.3.1.env" "$_leg"
+tethys_cfg_migrate "$_leg"
+check "migration reports how many keys it added" "11" "$TETHYS_CFG_ADDED"
+
+check "a legacy value that differs from the default survives verbatim" \
+  "--accept-dns=false --accept-routes=true --advertise-exit-node=false --shields-up=false --exit-node= --ssh=false" \
+  "$(cfgval "$_leg" TS_UP_ARGS)"
+# A value that DIFFERS from the schema default must never be "corrected" back to
+# it. The fixture's own values mostly coincide with the defaults, so this needs a
+# file of its own: one key set to a non-default literal, then a full completion.
+_nond="$_work/nondefault.env"
+printf "TS_POWER_MODE='saver'\n" > "$_nond"
+tethys_cfg_migrate "$_nond"
+check "a non-default enum value is preserved, not reset" "saver" "$(cfgval "$_nond" TS_POWER_MODE)"
+check "the rest of that file is still completed"         "17"    "$TETHYS_CFG_ADDED"
+check "a legacy empty value stays empty"   ""  "$(cfgval "$_leg" TS_HOSTNAME)"
+check "a newly added key takes the schema default" "balanced"    "$(cfgval "$_leg" TS_POWER_MODE)"
+check "the added tun mode default is correct"      "native-first" "$(cfgval "$_leg" TS_TUN_MODE)"
+check "the added log ceiling default is correct"   "512"          "$(cfgval "$_leg" TS_LOG_MAX_KB)"
+
+_missing=""
+while IFS= read -r _want; do
+  _k=${_want%%=*}
+  grep -q "^${_k}=" "$_leg" || _missing="$_missing $_k"
+done < "$_defaults"
+check "the migrated file now carries every schema key" "" "$_missing"
+check "the migrated file passes validation" "0" "$(tethys_cfg_validate "$_leg" >/dev/null 2>&1; echo $?)"
+check "a migration note was left behind" "present" \
+  "$( [ -f "$TETHYS_DATA_DIR/etc/config-migrated.note" ] && echo present || echo absent )"
+
+# ONCE. A second run must add nothing: an install that rewrote the file on
+# every upgrade would be a slow corruption of the user's own tuning.
+tethys_cfg_migrate "$_leg"
+check "a second migration adds nothing (one-time act)" "0" "$TETHYS_CFG_ADDED"
+
+# A file with no trailing newline must not weld the first added key onto its
+# last line - the file would then parse as neither.
+_nofinal="$_work/no-final-newline.env"
+printf 'TS_TUN_MODE=netstack-only' > "$_nofinal"
+tethys_cfg_migrate "$_nofinal"
+check "a newline-less tail is not welded to the added keys" "yes" \
+  "$(if grep -q 'netstack-onlyTS_' "$_nofinal"; then echo no; else echo yes; fi)"
+check "the newline-less file still validates" "0" \
+  "$(tethys_cfg_validate "$_nofinal" >/dev/null 2>&1; echo $?)"
+
+# A key present but EMPTY is a decision ("pass nothing"), not an absence.
+printf "TS_KILL_SWITCH=''\n" >> "$_leg"
+tethys_cfg_migrate "$_leg"
+check "a present-but-empty key is not refilled" "0" "$TETHYS_CFG_ADDED"
+
+# --- the loader degrades per line; a bad value never takes the boot down -----
+cat > "$_work/badval.env" <<'EOF'
+TS_POWER_MODE='turbo'
+TS_TUN_MODE='netstack-only'
+EOF
+TS_POWER_MODE=balanced
+tethys_cfg_load "$_work/badval.env" >/dev/null 2>&1
+check "an out-of-enum value is refused; the default stands" "balanced"      "$TS_POWER_MODE"
+check "a valid line in the same file is still applied"      "netstack-only" "$TS_TUN_MODE"
+
 echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

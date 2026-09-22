@@ -64,15 +64,47 @@ if ! tethys_ensure_dirs; then
 fi
 
 # ---------------------------------------------------------- persistent config
-# Seeded once. Never overwritten: this file is the user's, and an upgrade that
-# took their tuning away would be a bug dressed as an install.
+# The packaged template must itself pass the schema. A zip whose own defaults
+# fail validation would seed a broken truth onto every device that installs it,
+# and the failure would surface at boot - the worst possible moment.
+if ! tethys_cfg_validate "$MODPATH/config.env"; then
+  tethys_die "the packaged config.env does not satisfy the schema - refusing to install a broken default"
+fi
+
 if [ -f "$TETHYS_DATA_DIR/config.env" ]; then
+  # An EXISTING config belongs to the user and is never overwritten - an upgrade
+  # that took their tuning away would be a bug dressed as an install. But it IS
+  # completed: the canonical v2.3.1 file carried seven keys and this schema has
+  # eighteen, so the missing ones are filled ONCE (plan §8.3, R35). Present
+  # values are never rewritten - including present-but-empty ones, since empty
+  # means "pass nothing", which is a decision rather than an absence.
+  if ! tethys_cfg_validate "$TETHYS_DATA_DIR/config.env" >/dev/null 2>&1; then
+    tethys_ui "  config    : WARNING - existing config.env has invalid lines."
+    tethys_ui "              Those settings fall back to defaults; see"
+    tethys_ui "              $TETHYS_DATA_DIR/log/service.log for the reasons."
+  fi
+  tethys_cfg_migrate "$TETHYS_DATA_DIR/config.env"
   tethys_ui "  config    : kept existing $TETHYS_DATA_DIR/config.env"
+  if [ "$TETHYS_CFG_ADDED" -gt 0 ]; then
+    tethys_ui "  config    : completed it - $TETHYS_CFG_ADDED key(s) added with defaults"
+    tethys_ui "              note: $TETHYS_DATA_DIR/etc/config-migrated.note"
+  fi
 else
   cp -f "$MODPATH/config.env" "$TETHYS_DATA_DIR/config.env" || \
     tethys_die "could not seed $TETHYS_DATA_DIR/config.env"
   chmod 0600 "$TETHYS_DATA_DIR/config.env"
   tethys_ui "  config    : seeded $TETHYS_DATA_DIR/config.env"
+fi
+
+# ---------------------------------------------- the legacy truth, left alone
+# Upstream kept its settings in tailscale/settings.sh - a SHELL SCRIPT that the
+# service `source`d. That file is not read here, and its absence from our read
+# path is the whole point of §8.3: a file that once ran your shell is exactly
+# the file a migration must not trust. It is reported, never executed.
+if [ -f "$TETHYS_DATA_DIR/settings.sh" ]; then
+  tethys_ui "  legacy    : found $TETHYS_DATA_DIR/settings.sh"
+  tethys_ui "              NOT read - it is a script, and this module parses its"
+  tethys_ui "              config as data. Re-apply any settings in config.env."
 fi
 
 # ------------------------------------------------------------------ permissions
@@ -91,7 +123,11 @@ chmod 0700 "$TETHYS_DATA_DIR" 2>/dev/null
 # ---------------------------------------------------------------------- summary
 tethys_ui "  device    : $(tethys_device_codename) (ABI $_device_abi)"
 tethys_ui "  state root: $TETHYS_DATA_DIR"
-tethys_ui "  autostart : $( [ "$(grep -m1 '^TS_START_ON_BOOT=' "$TETHYS_DATA_DIR/config.env" 2>/dev/null | cut -d= -f2- | tr -d '\"')" = "0" ] && echo 'off' || echo 'on' )"
+# Both quote styles: the seed template writes double quotes and the migration
+# writes single ones, so a reader that knew only one of them would report 'off'
+# as 'on' - a summary line that lies about the very setting it exists to show.
+_boot=$(grep -m1 '^TS_START_ON_BOOT=' "$TETHYS_DATA_DIR/config.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'")
+tethys_ui "  autostart : $( [ "$_boot" = "0" ] && echo 'off' || echo 'on' )"
 tethys_ui "  ----------------------------------------"
 tethys_ui "  next      : reboot, then"
 tethys_ui "              tailscale status"

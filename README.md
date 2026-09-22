@@ -88,6 +88,33 @@ The config follows the plan's §8.3 schema and one law:
 > assigns only **allowlisted** keys, and never executes a line of the file.
 > `TS_EXTRA_UP_ARGS` is rejected outright if it contains shell metacharacters.
 
+The schema (`TETHYS_SCHEMA` in `scripts/tethys.lib.sh`) is the single truth for
+three things at once: **which keys exist**, **what they default to**, and **what a
+value may be**. Adding a setting and adding a validator are therefore the same
+act — a setting with no opinion about its own values is not a setting. On every
+install, `customize.sh` checks the file against it:
+
+- **The packaged template must pass its own schema**, or the installer refuses to
+  seed it. A broken default never reaches a device.
+- **An existing config is never overwritten.** The canonical v2.3.1 file carried
+  seven keys; this schema has eighteen, so the missing ones are filled **once**,
+  with their defaults, and a note is left at `etc/config-migrated.note`. Values
+  already present are never rewritten — including present-but-**empty** ones,
+  because empty means "pass nothing", which is a decision rather than an absence.
+- **A value that fails its key's validator is refused**: the default stands and
+  the reason is logged with a line number. Nothing is silently coerced into
+  something plausible, because a config that quietly means something other than
+  what it says is worse than one that says no. One deliberate exception —
+  `TS_LOG_MAX_KB` keeps the full 128–10240 range in the schema and is **clamped**
+  where it is consumed: a number slightly out of range is a preference to be
+  bounded, not a lie to be refused.
+- **A trailing `# note` belongs to the line, not the value.** The template
+  documents its own defaults that way. A **fully quoted** value is never cut, so a
+  `#` inside quotes survives as content.
+- **Upstream's `settings.sh` is never read.** It was a shell script that the
+  service `source`d, and a file that once ran your shell is exactly the file a
+  migration must not trust.
+
 Keys consumed today (M3):
 
 | key | default | effect |
@@ -171,6 +198,11 @@ place by catching real defects that `sh -n` passed straight through:
    untestable off-device.
 2. The directory list created `bin/` (read by no patch in the series) while
    omitting `certs/` (required by `patches/0012`).
+3. The packaged `config.env` **could not pass its own schema**: it documents its
+   defaults with trailing `# notes`, and the first classifier never learned to
+   strip one, so the template was judged as carrying values like
+   `"0"   # adds --ssh`. A template that cannot satisfy its own law is a lie
+   shipped to every device, and only a check for exactly that revealed it.
 
 It also proves the §8.3 law rather than assuming it: a config line that *would*
 execute if the file were sourced is loaded, and the test asserts the command
