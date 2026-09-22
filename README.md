@@ -1,0 +1,202 @@
+# Tethys · tailscaled
+
+A Magisk / KernelSU module that runs a **patched Tailscale daemon** on rooted
+Android, with its entire state rooted in one directory you can find, back up, and
+delete.
+
+Built for the **Google Pixel 6 Pro** (`raven`, `arm64-v8a`) from the pinned
+Tailscale **v1.98.8** Android patch series. Module id `tethys-tailscaled`; the
+panel it will grow is titled **The Beacon**.
+
+## Requirements
+
+| requirement | why |
+|---|---|
+| Magisk or KernelSU | the module format, and root for the daemon's own socket marks |
+| `arm64-v8a` device | the payload is arm64 only; the installer refuses any other ABI |
+| ~40 MB free on `/data` | state, logs and the daemon itself |
+
+## Install
+
+```sh
+# from the module zip
+magisk --install-module tethys-tailscaled-v1.98.8-tethys.0.zip
+# or flash the zip in the Magisk / KernelSU app, then reboot
+```
+
+The installer refuses loudly rather than installing something broken. It stops if
+the ABI is not arm64, if `system/bin/tailscaled` is missing or empty, or if
+`/data` is not writable — because a module that installs silently and then does
+nothing at boot is worse than one that says no.
+
+## Layout
+
+```
+module.prop                 module identity (Magisk / KernelSU)
+customize.sh                installer — validates ABI and payload, seeds the config
+service.sh                  boot launcher — starts the supervisor, returns immediately
+uninstall.sh                stops the daemon, and by default keeps your state
+config.env                  the schema (plan §8.3) — seed template only
+system/bin/tailscaled       the daemon — INJECTED BY CI, not committed (see debt)
+system/bin/tailscale        symlink to it; both land on PATH
+scripts/tethys.lib.sh       shared POSIX-sh helpers
+tests/shell-smoke.sh        behavioural test for everything above
+```
+
+At runtime the module lives at `/data/adb/modules/tethys-tailscaled/`.
+
+**Why `system/bin/`.** Magisk overlays a module's `system/` tree onto the real
+system partitions, so both binaries appear as `/system/bin/tailscaled` and
+`/system/bin/tailscale` — on `PATH` for every shell on the device, which is how
+upstream ships them too. The daemon is a multi-call binary and creates its own
+`tailscale` symlink on start; the installer pre-creates it as well, so the CLI
+answers *before* the daemon has ever been started. The daemon's own creation is
+idempotent, so there is no race — only earlier availability.
+
+## The state root — the one contract that matters
+
+The patched daemon does not take a state path from you. On Android it looks for
+`/data/adb/tailscale`, and if that directory exists it **adopts it for
+everything** (source: `patches/0002-paths-and-runtime-locations.patch`):
+
+| path | what lives there |
+|---|---|
+| `tailscaled.state` | the node private key — this device's identity to your tailnet |
+| `tailscaled.sock` | the control socket the CLI talks to |
+| `log/` | daemon and service logs |
+| `etc/resolv.conf` | resolver state, plus a `.pre-tailscale-backup` beside it |
+| `certs/` | TLS material for the local web surface |
+
+That directory *is* the contract. If it does not exist, state leaks into
+`$TMPDIR` and vanishes on reboot — so the module creates it, and nothing else in
+this module may relocate it.
+
+`log/`, `etc/` and `certs/` are created because the series reads them. There is
+deliberately **no `bin/`** under it: the daemon's `tailscale` symlink is created
+beside the *executable*, not here.
+
+## Configuration
+
+**Edit `/data/adb/tailscale/config.env`, not the copy in the module directory.**
+Magisk replaces the module directory on every upgrade, so anything kept inside it
+is silently reverted. The installer seeds the file to the data directory once,
+and `service.sh` reads that copy in preference to the packaged template.
+
+The config follows the plan's §8.3 schema and one law:
+
+> **Read as data, never sourced.** `tethys.lib.sh` parses `KEY=VALUE` lines,
+> assigns only **allowlisted** keys, and never executes a line of the file.
+> `TS_EXTRA_UP_ARGS` is rejected outright if it contains shell metacharacters.
+
+Keys consumed today (M3):
+
+| key | default | effect |
+|---|---|---|
+| `TS_START_ON_BOOT` | `1` | gates `service.sh` |
+| `TS_TUN_MODE` | `native-first` | `native-first` → `--tun=tailscale0,userspace-networking`; `native-only` → `--tun=tailscale0`; `netstack-only` → `--tun=userspace-networking` |
+| `TS_DAEMON_ARGS` | `-no-logs-no-support` | extra `tailscaled` flags |
+| `TS_LOG_MAX_KB` | `512` | log ceiling, **clamped** to 128–10240 rather than obeyed |
+
+Keys the schema declares for their own milestones — present so the file is the
+one config truth, not yet read by the daemon launch: `TS_UP_ARGS` and
+`TS_EXTRA_UP_ARGS` (M4), `TS_POWER_MODE` (M9), `TS_WATCHDOG_ENABLED` (M19),
+`TS_KILL_SWITCH` (M16), `TS_SPLIT_TUNNEL_*` (M17), `TS_PROFILE` /
+`TS_LOGIN_SERVER` / `TS_HOSTNAME` (M18), `TS_ENABLE_SSH` / `TS_ADVERTISE_ROUTES`
+(M14), `TS_THEME` / `TS_JOURNAL_ENABLED` (M15).
+
+**An empty value means "pass nothing", never "pass zero".**
+
+**No `GOMAXPROCS`/`GOGC`/`MSS` knobs here, deliberately.** An earlier draft of this
+module tuned the Go runtime from the shell. That was the wrong layer: the plan
+fixes economy *inside the daemon* (levers M9 power governor, M10 MTU-derived MSS),
+where the value can be measured rather than guessed at.
+
+## Operating it
+
+```sh
+M=/data/adb/modules/tethys-tailscaled
+
+tailscale status                            # both binaries are on PATH
+tail -f /data/adb/tailscale/log/tailscaled.log
+cat /data/adb/tailscale/log/service.log     # supervisor decisions
+
+# stop, and STAY stopped
+touch /data/adb/tailscale/stop
+kill "$(cat /data/adb/tailscale/tailscaled.pid)"
+
+# start again
+rm -f /data/adb/tailscale/stop
+sh $M/service.sh
+```
+
+`touch /data/adb/tailscale/stop` is the **manual-stop marker** — the only way to
+say *stay down*. Without it the supervisor treats an exit as a crash and restarts.
+
+## How the supervisor works
+
+`service.sh` starts the daemon under a supervisor and **returns immediately** — a
+boot script that blocks is a boot script that gets killed.
+
+The supervisor waits on the daemon with `wait`, not a polling loop. That is a
+deliberate choice for your battery: a supervisor that polled would itself be the
+drain, whereas this one wakes only when the daemon actually dies. On a crash it
+restarts along the plan's ladder **5 → 15 → 30 → 60 → 120 → 300 s**, holding at
+300, so a daemon that dies instantly cannot become a tight restart loop.
+
+## Uninstall
+
+```
+daemon stopped.
+State kept at /data/adb/tailscale
+```
+
+**Removing the module does not delete your tailnet identity.** `tailscaled.state`
+is the node key; a silent removal would cost you a re-auth you never asked for.
+So the uninstaller stops the daemon, reports the path, and leaves it. To remove
+everything, either delete that directory yourself, or create
+`/data/adb/tailscale/.purge-on-uninstall` before removing the module.
+
+## Testing
+
+```sh
+sh tests/shell-smoke.sh
+```
+
+This is not a syntax check. It runs the shell layer against a temporary state
+root and asserts what the daemon actually depends on. It has already earned its
+place by catching real defects that `sh -n` passed straight through:
+
+1. `tethys.lib.sh`'s predecessor **assigned** its state root instead of
+   defaulting it, so it silently ignored any override — the library was
+   untestable off-device.
+2. The directory list created `bin/` (read by no patch in the series) while
+   omitting `certs/` (required by `patches/0012`).
+
+It also proves the §8.3 law rather than assuming it: a config line that *would*
+execute if the file were sourced is loaded, and the test asserts the command
+never ran.
+
+One check reports **skipped, not passed**: this host cannot assert Unix file
+modes, so the `0700` claim on the state root remains **unproven here**. The
+device will settle it.
+
+## Debt, named rather than hidden
+
+1. **`system/bin/tailscaled` is not in this repository.** The daemon is produced
+   by applying the patch series in `tethys-tailscale-android` and building the
+   `arm64` target, then injected here by CI (milestone M2). Until that build
+   current exists, this zip is **not installable** — `customize.sh` refuses it,
+   by design, because a module whose daemon is absent cannot work.
+2. **Runtime tuning is reconciled by hand.** The fork's `devices/pixel6pro.env`
+   and this module's `config.env` both carry runtime keys; a CI step that emits
+   one from the other — or proves they agree — is owed with M2.
+3. **The panel, the six feature bundles, and the ritual journal do not exist
+   yet.** They are M12–M19 of the sealed plan; this module is its M3 skeleton.
+
+## Provenance and licence
+
+The daemon is Tailscale (**BSD-3-Clause**), modified by the Android patch series
+recreated in `tethys-tailscale-android`. Those modifications are the work of
+**Anas** (@anasfanani) in
+Magisk-Tailscale. Every constant this module's defaults rest on is recorded with
+its source and a sha256 in that repository's `docs/PROVENANCE.md`.

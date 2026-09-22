@@ -1,0 +1,10 @@
+# The daemon payload is injected by CI, never committed: a binary in a module
+# repo goes stale silently and cannot be reviewed. The installer refuses a zip
+# that lacks it, so an empty slot fails loudly rather than shipping quietly.
+system/bin/tailscaled
+system/bin/tailscale
+
+# Local install/test scratch
+*.tmp
+err.tmp
+/.tmp-*/

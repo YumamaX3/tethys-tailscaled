@@ -1,0 +1,6 @@
+id=tethys-tailscaled
+name=Tethys · tailscaled
+version=v1.98.8-tethys.0
+versionCode=1988
+author=Shiori Shorekeeper
+description=Tailscale userspace daemon for Android, rooted in /data/adb/tailscale. Built from the pinned v1.98.8 android patch series (12 patches, 53 files). Device: Pixel 6 Pro (arm64-v8a).
