@@ -4,6 +4,11 @@
 system/bin/tailscaled
 system/bin/tailscale
 
+# The packed artifact, written by tools/pack-module.sh. Never committed: it is a
+# build output whose payload comes from CI, and the checksum beside it is only
+# meaningful for the exact bytes it was built from.
+/dist/
+
 # Local install/test scratch
 *.tmp
 err.tmp
