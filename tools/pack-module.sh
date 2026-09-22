@@ -72,11 +72,13 @@ _required='module.prop customize.sh service.sh uninstall.sh config.env scripts/t
 
 # ACKNOWLEDGED - may exist in the tree, never enters the zip. .github/ is the
 # repository's own workflows; payload/ is where the workflow stages the daemon it
-# downloads. The daemon reaches the archive through system/, constructed from the
-# argument - so neither of them belongs in it. Both were learned the hard way:
-# this packer first met its own repository root in CI, refused it, and the zip
-# was never built.
-_ack='.git .gitignore README.md tests tools dist system .github payload'
+# downloads; .gitattributes is what keeps CRLF out of these scripts in the first
+# place. The daemon reaches the archive through system/, constructed from the
+# argument, so none of them belongs in it. The first two were learned the hard
+# way: this packer met its own repository root in CI, refused it, and the zip was
+# never built. The third was refused by this very list a minute after it existed -
+# the law working, not the law failing.
+_ack='.git .gitignore .gitattributes README.md tests tools dist system .github payload'
 
 pass=0
 fail=0
@@ -139,6 +141,20 @@ done
        archive is assembled by guesswork - and guesswork is how a file ends up
        silently missing from a zip that then fails on someone's device."
 ok "every top-level entry is declared"
+
+# ------------------------------------------------------------- line endings
+# Android's sh and CI's dash both refuse a script whose lines end in CR, and this
+# tree is authored on Windows, where an editor writes them without asking. Git
+# Bash hides exactly that - its shell reads scripts in text mode and strips the
+# CR - so the defect reached CI while every local run stayed green. The device is
+# the worst possible place to learn it, so the pack refuses here instead.
+for _f in $_required; do
+  _cr=$(tr -dc '\r' < "$_root/$_f" | wc -c | tr -d ' ')
+  [ "$_cr" = "0" ] || refuse "$_f carries CRLF line endings ($_cr CR bytes).
+       Android's sh and CI's dash both refuse a script whose lines end in CR, and
+       a device is the worst place to discover that. Write the file with LF."
+done
+ok "no shipped file carries CRLF line endings"
 
 # system/ is CONSTRUCTED, never copied. This scan catches a tree-side file that
 # would be silently dropped rather than shipped.

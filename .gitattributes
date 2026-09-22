@@ -1,0 +1,7 @@
+# This tree is POSIX sh and Android sh before it is anything else: no script here
+# may carry CRLF. The defect this prevents was measured, not imagined - a packer
+# rewritten from Windows reached CI with CRLF and dash refused it at the block it
+# had just gained ("set: Illegal option -"), while the same bytes ran perfectly in
+# Git Bash, whose shell reads scripts in text mode and strips the CR. One host hid
+# the defect; CI and the device would not have.
+* text=auto eol=lf

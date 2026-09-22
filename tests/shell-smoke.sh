@@ -339,6 +339,21 @@ check "an undeclared top-level entry still refuses the pack" "1" "$_stray_rc"
 check "and the refusal names the entry it has no opinion about" "yes" \
   "$(case "$_stray_out" in *mystery*) echo yes ;; *) echo no ;; esac)"
 
+# A CRLF shipped file must refuse too. Android's sh and CI's dash both read CR as
+# part of the command, and Git Bash hides it by reading scripts in text mode - so
+# this is precisely the defect a green local run will not show you.
+_crlf="$_work/crlf-tree"
+mkdir -p "$_crlf/scripts"
+for _f in module.prop customize.sh service.sh uninstall.sh config.env; do
+  cp "$_here/../$_f" "$_crlf/$_f"
+done
+cp "$_here/../scripts/tethys.lib.sh" "$_crlf/scripts/"
+printf 'exit 0\r\n' >> "$_crlf/customize.sh"
+_crlf_out=$( cd "$_here/.." && sh tools/pack-module.sh --audit-tree "$_crlf" 2>&1 ); _crlf_rc=$?
+check "a CRLF line ending in a shipped file refuses the pack" "1" "$_crlf_rc"
+check "and the refusal names that file" "yes" \
+  "$(case "$_crlf_out" in *customize.sh*CRLF*) echo yes ;; *) echo no ;; esac)"
+
 echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
