@@ -37,10 +37,13 @@ customize.sh                installer — validates ABI and payload, seeds the c
 service.sh                  boot launcher — starts the supervisor, returns immediately
 uninstall.sh                stops the daemon, and by default keeps your state
 config.env                  the schema (plan §8.3) — seed template only
-system/bin/tailscaled       the daemon — INJECTED BY CI, not committed (see debt)
+system/bin/tailscaled       the daemon — taken from the fork's release assets, never committed (see debt)
 system/bin/tailscale        symlink to it; both land on PATH
 scripts/tethys.lib.sh       shared POSIX-sh helpers
 tests/shell-smoke.sh        behavioural test for everything above
+tools/pack-module.sh        the packer — refuses what it cannot prove, then proves what it built
+tools/module-archive.py     the archive mechanics the packer drives
+.github/workflows/build-module.yml  fetches the released daemon and packs the zip
 ```
 
 At runtime the module lives at `/data/adb/modules/tethys-tailscaled/`.
@@ -212,13 +215,64 @@ One check reports **skipped, not passed**: this host cannot assert Unix file
 modes, so the `0700` claim on the state root remains **unproven here**. The
 device will settle it.
 
+## Packing
+
+Nothing assembles the zip by hand:
+
+```sh
+sh tools/pack-module.sh /path/to/tailscaled.arm64 .
+```
+
+The packer refuses, loudly, rather than shipping something broken:
+
+- a payload that is not an ELF object, or is not `arm64`;
+- a payload that disagrees with the `.sha256` shipped beside it — a mismatch
+  means either the binary is not the one that was built or the sidecar is stale,
+  and both mean *do not ship it*;
+- a tree missing any of the six files a module needs in order to install, or
+  carrying a top-level entry the packer has no opinion about — every entry is
+  either shipped or acknowledged, because guesswork is how a file goes missing
+  from a zip that then fails on someone's device;
+- a **red** `tests/shell-smoke.sh`: packing a broken runtime moves that failure
+  onto a device, at boot, which is the worst place to learn it;
+- anything in `system/` but the two gitignored payload paths, because `system/`
+  is *constructed* from the daemon argument rather than copied from the tree.
+
+Then it reads its own output back — `module.prop` at the archive root, no wrapper
+directory, the daemon inside, every shipped file present, every withheld entry
+absent, and the packed daemon the same length as the one it was given. A packer
+that trusts what it wrote ships a wrapper directory one day and finds out on
+someone else's phone.
+
+The archive is built by `tools/module-archive.py`, not the `zip` CLI, and that is
+a portability decision rather than a taste one: `zip` is installed on GitHub's
+runners and **not** on the Windows machine this project is developed on, while
+python is on both. One implementation, so the two shores cannot disagree about
+entry order, modes, or layout — and every entry carries a fixed timestamp and an
+explicit mode, so packing the same tree twice yields byte-identical archives. A
+checksum that describes the moment it ran is worth nothing to whoever verifies it
+later.
+
+`dist/` is never committed: the payload comes from CI, and the sidecar checksum
+only means anything for the exact bytes it was built from.
+
 ## Debt, named rather than hidden
 
-1. **`system/bin/tailscaled` is not in this repository.** The daemon is produced
-   by applying the patch series in `tethys-tailscale-android` and building the
-   `arm64` target, then injected here by CI (milestone M2). Until that build
-   current exists, this zip is **not installable** — `customize.sh` refuses it,
-   by design, because a module whose daemon is absent cannot work.
+1. **`system/bin/tailscaled` is not in this repository, and will not be.** The
+   daemon is produced by applying the patch series in `tethys-tailscale-android`
+   and building the `arm64` target, and `.github/workflows/build-module.yml`
+   takes it from that repository's **release assets** — checking it against the
+   `SHA256SUMS` published beside it — then hands it to `tools/pack-module.sh`,
+   which gates on this module's own suite before it packs anything.
+
+   So the tooling no longer owes a daemon; the fork's **first release** does.
+   Until that tag exists this zip is still not installable — `customize.sh`
+   refuses it, by design, because a module whose daemon is absent cannot work.
+
+   One thing will bite while the fork is private: this repository's built-in
+   token cannot read another private repository, so a classic PAT with `repo`
+   read must be stored as the `FORK_TOKEN` secret. A public fork needs nothing —
+   the workflow falls back to the built-in token.
 2. **Identity keys are still reconciled by hand.** The fork's
    `devices/pixel6pro.env` and this module's `config.env` both name device
    identity (`TETHYS_MATCH_*`), and the two are compared by eye today. Proving

@@ -1,0 +1,117 @@
+name: build-module
+
+# Milestone M2, the module half — the current that puts a daemon INTO the zip.
+#
+# The daemon is not in this repository and never will be: it is built by
+# tethys-tailscale-android (its patch series applied to the pinned Tailscale tag)
+# and published as a release asset there. This workflow fetches that artifact,
+# verifies it against the manifest the fork published beside it, and hands it to
+# tools/pack-module.sh — which refuses anything it cannot prove, gates on this
+# module's own shell suite, and reads its own output back before calling it
+# shippable.
+#
+# NOTHING HERE IS ON A SCHEDULE. A module build is a deliberate act: the packer's
+# whole value is that it stops rather than ships, and a build nobody asked for is
+# a build whose refusal nobody reads.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      daemon_tag:
+        description: "Release tag in the fork to take the daemon from (empty = the fork's latest release)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  # A repository variable may point this elsewhere, so renaming the fork or moving
+  # it to another owner does not require editing this file.
+  DAEMON_REPO: ${{ vars.DAEMON_REPO || format('{0}/tethys-tailscale-android', github.repository_owner) }}
+
+jobs:
+  pack:
+    name: fetch the daemon, prove it, pack it
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this module
+        uses: actions/checkout@v4
+
+      - name: Resolve the daemon's release tag
+        id: daemon
+        env:
+          # The dispatch input reaches the shell through the ENVIRONMENT, never by
+          # interpolation into the script: a value pasted into `run:` is a value
+          # that can carry shell syntax along with it.
+          DAEMON_TAG: ${{ inputs.daemon_tag }}
+          # A PRIVATE fork cannot be read by this repository's built-in token, so a
+          # classic PAT with `repo` read belongs in the FORK_TOKEN secret. A public
+          # fork needs nothing: the fallback token can read it.
+          GH_TOKEN: ${{ secrets.FORK_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$DAEMON_TAG"
+          if [ -z "$tag" ]; then
+            tag="$(gh release view --repo "$DAEMON_REPO" --json tagName --jq .tagName)"
+          fi
+          test -n "$tag" || { echo "FAIL: no release found in $DAEMON_REPO" >&2; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "daemon release: $DAEMON_REPO $tag"
+
+      - name: Fetch the daemon and the manifest published beside it
+        env:
+          # Same discipline as above: the tag resolved in the previous step arrives
+          # as an environment value rather than as text spliced into this script.
+          DAEMON_TAG: ${{ steps.daemon.outputs.tag }}
+          GH_TOKEN: ${{ secrets.FORK_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p payload
+          gh release download "$DAEMON_TAG" \
+            --repo "$DAEMON_REPO" \
+            --pattern 'tailscaled.arm64' \
+            --pattern 'SHA256SUMS' \
+            --dir payload
+          ls -l payload
+
+      - name: Verify the daemon against the fork's own manifest
+        run: |
+          set -euo pipefail
+          test -s payload/tailscaled.arm64 || { echo "FAIL: the daemon asset is missing or empty" >&2; exit 1; }
+          # The fork publishes ONE SHA256SUMS covering every arch it built, so the
+          # check is narrowed to the asset this module actually consumes. The
+          # sidecar written here is what the packer refuses against: a mismatch is
+          # a refusal there, not a warning.
+          grep -E '[[:space:]]tailscaled\.arm64$' payload/SHA256SUMS > payload/tailscaled.arm64.sha256
+          test -s payload/tailscaled.arm64.sha256 || { echo "FAIL: SHA256SUMS carries no line for tailscaled.arm64" >&2; exit 1; }
+          ( cd payload && sha256sum -c tailscaled.arm64.sha256 )
+          file payload/tailscaled.arm64
+
+      - name: Pack the module
+        run: sh tools/pack-module.sh payload/tailscaled.arm64 .
+
+      - name: Keep the zip and its witness
+        uses: actions/upload-artifact@v4
+        with:
+          name: tethys-tailscaled-module
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+      - name: Publish, when this run is a tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Tethys tailscaled ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*.zip dist/*.sha256 || \
+          gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/*.sha256 --clobber

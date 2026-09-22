@@ -30,7 +30,9 @@
 # whatever stray file is lying on disk (both payload paths are gitignored). Its
 # sha256 is verified against the sidecar the CI release ships, its length must
 # survive the round trip through the archive, and the archive's own structure is
-# read back with unzip before this script will call the result finished.
+# read back with tools/module-archive.py before this script calls the result
+# finished - never taken on trust, because a packer that trusts its own output
+# ships a wrapper directory one day and finds out on someone else's phone.
 #
 # Usage:  sh tools/pack-module.sh <path-to-tailscaled> [repo-root]
 # Exit:   0 = zip built and its structure proven, 1 = refused
